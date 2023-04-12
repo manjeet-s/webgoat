@@ -1,0 +1,53 @@
+# example workflow for Coverity thin client with CNC scan farm
+name: coverity-thin-client
+
+on:
+  push:
+    branches: [ main, master, stage, release ]
+  pull_request:
+    branches: [ main, master, stage, release ]
+  workflow_dispatch:
+
+jobs:
+  coverity:
+    runs-on: ubuntu-latest
+    env:
+      #COVERITY_URL: ${{ vars.COVERITY_URL }}
+      COVERITY_URL: https://cnc.chuckaude.com
+      COV_USER: ${{ secrets.COVERITY_USER }}
+      COVERITY_PASSPHRASE: ${{ secrets.COVERITY_PASSPHRASE }}
+      COVERITY_PROJECT: ${{ github.event.repository.name }}
+      COVERITY_STREAM: ${{ github.event.repository.name }}-${{ github.ref_name }}
+      COVERITY_TOOLKIT: cov_thin_client-linux64-2023.3.0.tar.gz   # see ER CNC-861 to support version=latest
+    steps:
+    - name: Checkout Source
+      uses: actions/checkout@v3
+    - name: Setup Java JDK
+      uses: actions/setup-java@v3
+      with:
+        java-version: 17
+        distribution: microsoft
+        cache: maven
+    - name: Coverity Download
+      run: |
+        curl -fLsS $COVERITY_URL/api/v2/scans/downloads/$COVERITY_TOOLKIT | tar -C $RUNNER_TEMP -xzf -
+    - name: Coverity Full Scan
+      if: ${{ github.event_name != 'pull_request' }}
+      run: |
+        $RUNNER_TEMP/bin/coverity scan -o commit.connect.url=$COVERITY_URL -o commit.connect.stream=$COVERITY_STREAM -o analyze.location=connect
+    - name: Coverity Quality Gate
+      if: ${{ github.event_name != 'pull_request' }}
+      run: |
+        curl -fLsS --user $COV_USER:$COVERITY_PASSPHRASE $COVERITY_URL/api/viewContents/issues/v1/Outstanding%20Issues?projectId=$COVERITY_PROJECT > issues.json
+        if [ $(cat issues.json | jq .viewContentsV1.totalRows) -ne 0 ]; then cat issues.json | jq .viewContentsV1.rows; fi
+    - name: Get PR Changeset
+      id: changeset
+      if: ${{ github.event_name == 'pull_request' }}
+      uses: jitterbit/get-changed-files@v1
+    - name: Coverity PR Scan - PFI
+      if: ${{ github.event_name == 'pull_request' && steps.changeset.outputs.added_modified != '' }}
+      run: |
+        $RUNNER_TEMP/bin/coverity scan -o commit.connect.url=$COVERITY_URL -o commit.connect.stream=$COVERITY_PROJECT-$GITHUB_BASE_REF -o analyze.location=connect \
+          -o commit.connect.comparison-report=comparison-report.json
+        cat comparison-report.json | jq '.issues[] | select(.presentInReferenceSnapshot == false and (.impact == "Medium" or .impact == "High"))' > new-issues.json
+        if [ -s new-issues.json ]; then cat new-issues.json | jq; exit 1; fi

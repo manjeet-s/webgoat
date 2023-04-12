@@ -1,0 +1,57 @@
+def PROJECT = 'chuckaude-webgoat'
+pipeline {
+    agent { label 'linux64' }
+    tools {
+        maven 'maven-3.8'
+        jdk 'openjdk-17'
+    }
+    environment {
+        DETECT_PROJECT_NAME = "$PROJECT"
+        DETECT_PROJECT_VERSION_NAME = "$BRANCH_NAME"
+        DETECT_CODE_LOCATION_NAME = "$PROJECT-$BRANCH_NAME"
+        DETECT_EXCLUDED_DETECTOR_TYPES = 'GIT'
+    }
+    stages {
+        stage('build') {
+            steps {
+                sh 'mvn -B package'
+            }
+        }
+        stage('Black Duck Full Scan') {
+            when {
+                allOf {
+                    expression { BRANCH_NAME ==~ /(develop|stage|release)/ }
+                    not { changeRequest() }
+                }
+            }
+            steps {
+                script {
+                    status = synopsys_detect detectProperties: "--detect.policy.check.fail.on.severities=BLOCKER --detect.risk.report.pdf=true --detect.timeout=300", returnStatus: true
+                    if (status == 3) { unstable 'policy violation' }
+                    else if (status != 0) { error 'detect failure' }
+                }
+            }
+        }
+        stage('Black Duck Rapid Scan') {
+            when {
+                anyOf {
+                    not { expression { BRANCH_NAME ==~ /(develop|stage|release)/ } }
+                    changeRequest()
+                }
+            }
+            steps {
+                script {
+                    status = synopsys_detect detectProperties: "--detect.blackduck.scan.mode=RAPID", returnStatus: true
+                    if (status == 3) { unstable 'policy violation' }
+                    else if (status != 0) { error 'detect failure' }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            archiveArtifacts allowEmptyArchive: true, artifacts: '*_BlackDuck_RiskReport.pdf'
+            cleanWs()
+        }
+    }
+}
